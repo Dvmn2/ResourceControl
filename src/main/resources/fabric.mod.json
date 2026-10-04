@@ -3,7 +3,7 @@
   "id": "resourcecontrol",
   "version": "${version}",
   "name": "ResourceControl",
-  "description": "",
+  "description": "Applies per-player resource packs pushed by the ResourceControlPlugin server plugin.",
   "authors": [],
   "contact": {},
   "license": "All-Rights-Reserved",

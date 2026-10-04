@@ -1,0 +1,7 @@
+{
+  "resourcecontrol.progress": "Загрузка ресурсов %s (%s/%s) %s %s%% (%s)",
+  "resourcecontrol.applying": "Применение ресурсов...",
+  "resourcecontrol.done": "Ресурсы применены",
+  "resourcecontrol.failed": "Не удалось загрузить ресурсы: %s",
+  "resourcecontrol.cleared": "ResourceControl: сохранённые паки удалены, ресурсы перезагружаются."
+}

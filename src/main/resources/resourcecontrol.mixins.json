@@ -3,12 +3,9 @@
   "minVersion": "0.8",
   "package": "net.dvmn2.resourcecontrol.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": [
+  "client": [
   ],
   "injectors": {
     "defaultRequire": 1
-  },
-  "overwrites": {
-    "requireAnnotations": true
   }
 }

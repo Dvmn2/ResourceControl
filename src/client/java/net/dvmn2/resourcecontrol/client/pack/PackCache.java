@@ -1,0 +1,116 @@
+package net.dvmn2.resourcecontrol.client.pack;
+
+import net.fabricmc.loader.api.FabricLoader;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+/**
+ * Локальный кеш паков: {@code <gameDir>/resourcecontrol/cache/<sha1>.zip}.
+ * Имя файла строится ТОЛЬКО из проверенного sha1 (40 hex), поэтому ни URL, ни имя пака
+ * из сети не могут повлиять на путь на диске. Паки не распаковываются — они
+ * подключаются прямо из zip, так что path traversal невозможен по построению.
+ */
+public final class PackCache {
+
+    /**
+     * Жёсткий потолок размера одного пака на стороне клиента, что бы ни прислал сервер.
+     */
+    public static final long MAX_PACK_SIZE = 256L * 1024 * 1024;
+
+    private static final Pattern SHA1 = Pattern.compile("[0-9a-f]{40}");
+    private static final Pattern NAME = Pattern.compile("[a-z0-9_-]{1,32}");
+
+    private PackCache() {
+    }
+
+    public static Path root() {
+        return FabricLoader.getInstance().getGameDir().resolve("resourcecontrol");
+    }
+
+    public static Path cacheDir() {
+        return root().resolve("cache");
+    }
+
+    public static Path stateFile() {
+        return root().resolve("state.json");
+    }
+
+    public static Path file(String sha1) {
+        return cacheDir().resolve(sha1 + ".zip");
+    }
+
+    public static Path partFile(String sha1) {
+        return cacheDir().resolve(sha1 + ".part");
+    }
+
+    public static boolean isValidSha1(String s) {
+        return s != null && SHA1.matcher(s).matches();
+    }
+
+    public static boolean isValidName(String s) {
+        return s != null && NAME.matcher(s).matches();
+    }
+
+    /**
+     * Проверка скачанного/закешированного zip.
+     *
+     * @return null, если пак годен; иначе — причина отказа
+     */
+    public static String inspect(Path file, boolean allowShaders) {
+        try (ZipFile zip = new ZipFile(file.toFile())) {
+            if (zip.getEntry("pack.mcmeta") == null) {
+                return "no pack.mcmeta in archive root";
+            }
+            if (!allowShaders) {
+                var entries = zip.entries();
+                while (entries.hasMoreElements()) {
+                    ZipEntry entry = entries.nextElement();
+                    String[] parts = entry.getName().split("/");
+                    if (parts.length >= 3 && parts[0].equals("assets") && parts[2].equals("shaders")) {
+                        return "shaders are not allowed by the server";
+                    }
+                }
+            }
+            return null;
+        } catch (IOException ex) {
+            return "not a valid zip: " + ex.getMessage();
+        }
+    }
+
+    /**
+     * Удаляет из кеша файлы, которые не используются и не менялись 14 дней.
+     */
+    public static void cleanup(Set<String> keepSha1) {
+        Path dir = cacheDir();
+        if (!Files.isDirectory(dir)) {
+            return;
+        }
+        Instant threshold = Instant.now().minus(14, ChronoUnit.DAYS);
+        try (Stream<Path> files = Files.list(dir)) {
+            files.forEach(path -> {
+                String fileName = path.getFileName().toString();
+                int dot = fileName.lastIndexOf('.');
+                String base = dot < 0 ? fileName : fileName.substring(0, dot);
+                if (keepSha1.contains(base)) {
+                    return;
+                }
+                try {
+                    if (Files.getLastModifiedTime(path).toInstant().isBefore(threshold)) {
+                        Files.deleteIfExists(path);
+                    }
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException ignored) {
+        }
+    }
+}

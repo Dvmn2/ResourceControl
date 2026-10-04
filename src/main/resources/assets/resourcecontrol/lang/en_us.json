@@ -1,0 +1,7 @@
+{
+  "resourcecontrol.progress": "Downloading resources %s (%s/%s) %s %s%% (%s)",
+  "resourcecontrol.applying": "Applying resources...",
+  "resourcecontrol.done": "Resources applied",
+  "resourcecontrol.failed": "Failed to load resources: %s",
+  "resourcecontrol.cleared": "ResourceControl: saved packs cleared, reloading resources."
+}
