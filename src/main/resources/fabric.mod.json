@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "resourcecontrol",
+  "version": "${version}",
+  "name": "ResourceControl",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/resourcecontrol/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-datagen": [
+      "net.dvmn2.resourcecontrol.client.ResourceControlDataGenerator"
+    ],
+    "client": [
+      "net.dvmn2.resourcecontrol.client.ResourceControlClient"
+    ],
+    "main": [
+      "net.dvmn2.resourcecontrol.ResourceControl"
+    ]
+  },
+  "mixins": [
+    "resourcecontrol.mixins.json",
+    {
+      "config": "resourcecontrol.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
