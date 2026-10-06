@@ -36,6 +36,22 @@ public final class ResourceSync {
      */
     private static String appliedSignature = null;
 
+    /**
+     * Перезагрузка ресурсов запрошена, но ещё не запущена. Только клиентский поток.
+     * Реально запускается в {@link #onTick}, когда это безопасно (нет другой перезагрузки/оверлея).
+     */
+    private static boolean reloadRequested = false;
+
+    /**
+     * Не запускать перезагрузку, пока клиент ещё в мире (после дисконнекта мир ещё разбирается).
+     */
+    private static boolean deferUntilOutOfWorld = false;
+
+    /**
+     * Показать «готово» после завершения перезагрузки.
+     */
+    private static boolean announceDone = false;
+
     private ResourceSync() {
     }
 
@@ -56,15 +72,18 @@ public final class ResourceSync {
 
     /**
      * Дисконнект: сессионные паки уходят, постоянные остаются (панорама меню).
+     * <p>
+     * Событие DISCONNECT приходит ДО того, как ванильный код закончил разбирать мир. Запускать
+     * перезагрузку ресурсов прямо здесь нельзя: она гонится с закрытием мира (Voxy/Iris/Sodium и
+     * ванильные рабочие потоки) и может не завершиться — красный экран остаётся навсегда.
+     * Поэтому только помечаем, что перезагрузка нужна; запускает её {@link #onTick}.
      */
     public static void onDisconnect(MinecraftClient client) {
         GENERATION.incrementAndGet();
         ActivePacks.clearSession();
-        String signature = ActivePacks.signature();
         client.execute(() -> {
-            if (!signature.equals(appliedSignature)) {
-                appliedSignature = signature;
-                PackProfiles.reload(client);
+            if (!ActivePacks.signature().equals(appliedSignature)) {
+                requestReload(true, false);
             }
         });
     }
@@ -75,8 +94,57 @@ public final class ResourceSync {
     public static void clearPersistent(MinecraftClient client) {
         GENERATION.incrementAndGet();
         ActivePacks.clearPersistent();
-        appliedSignature = ActivePacks.signature();
-        PackProfiles.reload(client);
+        requestReload(false, false);
+    }
+
+    // ------------------------------------------------------------------
+    // Отложенная перезагрузка ресурсов
+    // ------------------------------------------------------------------
+
+    private static void requestReload(boolean untilOutOfWorld, boolean announce) {
+        // если уже ждёт запрос без отсрочки — отсрочка не должна его задерживать
+        deferUntilOutOfWorld = reloadRequested ? (deferUntilOutOfWorld && untilOutOfWorld) : untilOutOfWorld;
+        announceDone = announce;
+        reloadRequested = true;
+    }
+
+    /**
+     * Каждый клиентский тик (END_CLIENT_TICK). Запускает отложенную перезагрузку, когда безопасно:
+     * сейчас не идёт другая перезагрузка (оверлей) и, для дисконнекта, мир уже закрыт.
+     * Повторный reloadResources() во время идущей перезагрузки ванилью игнорируется, поэтому
+     * подпись «применённого» набора фиксируется только в момент реального запуска.
+     */
+    public static void onTick(MinecraftClient client) {
+        if (!reloadRequested || client.getOverlay() != null) {
+            return;
+        }
+        if (deferUntilOutOfWorld && client.world != null) {
+            return;
+        }
+        reloadRequested = false;
+        boolean announce = announceDone;
+        announceDone = false;
+
+        String signature = ActivePacks.signature();
+        if (signature.equals(appliedSignature)) {
+            return;
+        }
+        appliedSignature = signature;
+
+        if (announce) {
+            showOverlay(client, Text.translatable("resourcecontrol.applying"));
+        }
+        try {
+            PackProfiles.reload(client).whenComplete((ignored, error) -> client.execute(() -> {
+                if (error != null) {
+                    System.err.println("[ResourceControl] Перезагрузка ресурсов завершилась ошибкой: " + error);
+                } else if (announce) {
+                    showOverlay(client, Text.translatable("resourcecontrol.done"));
+                }
+            }));
+        } catch (RuntimeException ex) {
+            System.err.println("[ResourceControl] Не удалось запустить перезагрузку ресурсов: " + ex);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -231,13 +299,7 @@ public final class ResourceSync {
         EXECUTOR.submit(() -> PackCache.cleanup(keep));
 
         if (changed) {
-            appliedSignature = signature;
-            showOverlay(client, Text.translatable("resourcecontrol.applying"));
-            PackProfiles.reload(client).whenComplete((ignored, error) -> client.execute(() -> {
-                if (error == null && failures.isEmpty()) {
-                    showOverlay(client, Text.translatable("resourcecontrol.done"));
-                }
-            }));
+            requestReload(false, failures.isEmpty());
         }
 
         if (failures.isEmpty()) {
