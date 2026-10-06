@@ -3,5 +3,11 @@
   "resourcecontrol.applying": "Applying resources...",
   "resourcecontrol.done": "Resources applied",
   "resourcecontrol.failed": "Failed to load resources: %s",
-  "resourcecontrol.cleared": "ResourceControl: saved packs cleared, reloading resources."
+  "resourcecontrol.cleared": "ResourceControl: saved packs cleared, reloading resources.",
+  "resourcecontrol.consent.title": "Resource pack download permission",
+  "resourcecontrol.consent.message": "The server requests permission to download resource packs up to %s each. Allow only if you fully trust this server.",
+  "resourcecontrol.consent.allow": "Allow",
+  "resourcecontrol.consent.deny": "Deny",
+  "resourcecontrol.size.mb": "%s MB",
+  "resourcecontrol.size.gb": "%s GB"
 }

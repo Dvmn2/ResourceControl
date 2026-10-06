@@ -22,9 +22,10 @@ import java.util.zip.ZipFile;
 public final class PackCache {
 
     /**
-     * Жёсткий потолок размера одного пака на стороне клиента, что бы ни прислал сервер.
+     * Абсолютный потолок размера одного пака (4 ГБ). Сервер не может запросить больше, что бы он
+     * ни прислал. Реально действующий лимит — то, что одобрил игрок (см. {@code ConsentStore}).
      */
-    public static final long MAX_PACK_SIZE = 256L * 1024 * 1024;
+    public static final long MAX_PACK_SIZE = 4L * 1024 * 1024 * 1024;
 
     private static final Pattern SHA1 = Pattern.compile("[0-9a-f]{40}");
     private static final Pattern NAME = Pattern.compile("[a-z0-9_-]{1,32}");

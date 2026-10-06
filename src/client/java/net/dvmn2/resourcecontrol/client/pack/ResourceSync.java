@@ -1,10 +1,13 @@
 package net.dvmn2.resourcecontrol.client.pack;
 
+import net.dvmn2.resourcecontrol.client.network.LimitPayload;
 import net.dvmn2.resourcecontrol.client.network.StatusPayload;
 import net.dvmn2.resourcecontrol.client.network.SyncPayload;
 import net.dvmn2.resourcecontrol.client.network.SyncPayload.PackEntry;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ConfirmScreen;
+import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.Text;
 
 import java.io.IOException;
@@ -52,6 +55,41 @@ public final class ResourceSync {
      */
     private static boolean announceDone = false;
 
+    // --- Согласие игрока на размер паков. Только клиентский поток. Решение живёт ТОЛЬКО на клиенте. ---
+
+    /**
+     * Действующий лимит размера одного пака. 0 — согласия нет, от сервера ничего не скачиваем.
+     */
+    private static long grantedLimit = 0L;
+
+    /**
+     * Одобрено в этой сессии (нужно, когда сервер нельзя опознать и согласие не сохраняется на диск).
+     */
+    private static long sessionApproved = 0L;
+
+    /**
+     * Игрок отказал на запрос declinedLimit; на тот же запрос повторно не спрашиваем до перезахода.
+     */
+    private static boolean declined = false;
+    private static long declinedLimit = 0L;
+
+    /**
+     * Лимит, о котором сейчас спрашивает открытый диалог.
+     */
+    private static long pendingLimit = 0L;
+
+    /**
+     * Последний rc_sync, ожидающий решения игрока (новый заменяет старый).
+     */
+    private static SyncPayload heldSync = null;
+
+    /**
+     * Номер диалога: колбэк устаревшего диалога (после дисконнекта/нового запроса) игнорируется.
+     */
+    private static int consentSerial = 0;
+    private static ConfirmScreen consentScreen = null;
+    private static Screen consentParent = null;
+
     private ResourceSync() {
     }
 
@@ -80,6 +118,7 @@ public final class ResourceSync {
      */
     public static void onDisconnect(MinecraftClient client) {
         GENERATION.incrementAndGet();
+        resetConsentState();
         ActivePacks.clearSession();
         client.execute(() -> {
             if (!ActivePacks.signature().equals(appliedSignature)) {
@@ -152,22 +191,162 @@ public final class ResourceSync {
     // ------------------------------------------------------------------
 
     /**
-     * Клиентский поток.
+     * Клиентский поток. Без согласия игрока набор НЕ обрабатывается: ничего не скачивается и не применяется.
      */
     public static void onSync(MinecraftClient client, SyncPayload payload) {
+        if (grantedLimit > 0) {
+            startSync(client, payload, grantedLimit);
+        } else if (!declined) {
+            heldSync = payload; // ждём решения игрока
+        }
+        // declined и согласия нет — молча игнорируем
+    }
+
+    private static void startSync(MinecraftClient client, SyncPayload payload, long limit) {
         int generation = GENERATION.incrementAndGet();
         List<PackEntry> wanted;
         try {
-            wanted = validate(payload);
+            wanted = validate(payload, limit);
         } catch (IllegalArgumentException ex) {
             sendStatus(client, StatusPayload.STATE_FAILED, ex.getMessage());
             return;
         }
         boolean allowShaders = payload.allowShaders();
-        EXECUTOR.submit(() -> process(client, generation, wanted, allowShaders));
+        EXECUTOR.submit(() -> process(client, generation, wanted, allowShaders, limit));
     }
 
-    private static List<PackEntry> validate(SyncPayload payload) {
+    // ------------------------------------------------------------------
+    // Запрос лимита и согласие игрока
+    // ------------------------------------------------------------------
+
+    /**
+     * Сервер просит разрешить паки размером до N. Клиентский поток.
+     * Спрашиваем игрока, только если N больше уже одобренного для этого сервера.
+     */
+    public static void onLimit(MinecraftClient client, LimitPayload payload) {
+        if (payload.protocol() != PROTOCOL) {
+            sendStatus(client, StatusPayload.STATE_FAILED, "unsupported protocol " + payload.protocol());
+            return;
+        }
+        long requested = Math.min(payload.maxPackBytes(), PackCache.MAX_PACK_SIZE);
+        if (requested <= 0) {
+            sendStatus(client, StatusPayload.STATE_FAILED, "invalid size limit");
+            return;
+        }
+
+        String key = ConsentStore.serverKey(client);
+        long approvedBytes = Math.max(ConsentStore.approved(key), sessionApproved);
+        if (approvedBytes >= requested) {
+            // Лимит тот же или ниже одобренного — игрока не беспокоим.
+            declined = false;
+            grantedLimit = requested;
+            dismissDialog(client);
+            processHeld(client);
+            return;
+        }
+        if (declined && declinedLimit == requested) {
+            return;
+        }
+        declined = false;
+        askConsent(client, requested);
+    }
+
+    private static void askConsent(MinecraftClient client, long requested) {
+        pendingLimit = requested;
+        int serial = ++consentSerial;
+        Screen parent = (consentScreen != null && client.currentScreen == consentScreen)
+                ? consentParent : client.currentScreen;
+        ConfirmScreen screen = new ConfirmScreen(
+                allowed -> onConsentResult(client, serial, allowed),
+                Text.translatable("resourcecontrol.consent.title"),
+                Text.translatable("resourcecontrol.consent.message", formatSize(requested)),
+                Text.translatable("resourcecontrol.consent.allow"),
+                Text.translatable("resourcecontrol.consent.deny"));
+        consentScreen = screen;
+        consentParent = parent;
+        client.setScreen(screen);
+    }
+
+    private static void onConsentResult(MinecraftClient client, int serial, boolean allowed) {
+        if (serial != consentSerial) {
+            return;
+        }
+        long limit = pendingLimit;
+        closeDialog(client);
+
+        if (allowed) {
+            String key = ConsentStore.serverKey(client);
+            if (key != null) {
+                ConsentStore.approve(key, limit);
+            }
+            sessionApproved = Math.max(sessionApproved, limit);
+            declined = false;
+            grantedLimit = limit;
+            processHeld(client);
+        } else {
+            declined = true;
+            declinedLimit = limit;
+            if (grantedLimit <= 0) {
+                heldSync = null;
+                GENERATION.incrementAndGet(); // отменить возможную загрузку
+            }
+            // Только информация для админа; на решения сервера это не влияет.
+            sendStatus(client, StatusPayload.STATE_FAILED, "declined by player");
+        }
+    }
+
+    private static void processHeld(MinecraftClient client) {
+        SyncPayload held = heldSync;
+        heldSync = null;
+        if (held != null) {
+            startSync(client, held, grantedLimit);
+        }
+    }
+
+    /**
+     * Закрывает открытый диалог (если он ещё на экране) и инвалидирует его колбэк.
+     */
+    private static void dismissDialog(MinecraftClient client) {
+        if (consentScreen != null) {
+            consentSerial++;
+            closeDialog(client);
+        }
+    }
+
+    private static void closeDialog(MinecraftClient client) {
+        Screen parent = consentParent;
+        boolean onScreen = consentScreen != null && client.currentScreen == consentScreen;
+        consentScreen = null;
+        consentParent = null;
+        if (onScreen) {
+            client.setScreen(parent);
+        }
+    }
+
+    private static void resetConsentState() {
+        grantedLimit = 0L;
+        sessionApproved = 0L;
+        declined = false;
+        declinedLimit = 0L;
+        pendingLimit = 0L;
+        heldSync = null;
+        consentSerial++; // колбэк открытого диалога больше не сработает
+        consentScreen = null; // сам экран заменит ванильный код дисконнекта
+        consentParent = null;
+    }
+
+    private static Text formatSize(long bytes) {
+        long mb = Math.max(1L, bytes / 1048576L);
+        if (mb >= 1024) {
+            String gb = mb % 1024 == 0
+                    ? String.valueOf(mb / 1024)
+                    : String.format(Locale.ROOT, "%.1f", mb / 1024.0);
+            return Text.translatable("resourcecontrol.size.gb", gb);
+        }
+        return Text.translatable("resourcecontrol.size.mb", String.valueOf(mb));
+    }
+
+    private static List<PackEntry> validate(SyncPayload payload, long limit) {
         if (payload.protocol() != PROTOCOL) {
             throw new IllegalArgumentException("unsupported protocol " + payload.protocol());
         }
@@ -182,7 +361,7 @@ public final class ResourceSync {
             if (!PackCache.isValidSha1(e.sha1())) {
                 throw new IllegalArgumentException("invalid sha1 for " + e.name());
             }
-            if (e.size() <= 0 || e.size() > PackCache.MAX_PACK_SIZE) {
+            if (e.size() <= 0 || e.size() > limit || e.size() > PackCache.MAX_PACK_SIZE) {
                 throw new IllegalArgumentException("invalid size for " + e.name());
             }
             try {
@@ -205,7 +384,8 @@ public final class ResourceSync {
         return generation != GENERATION.get();
     }
 
-    private static void process(MinecraftClient client, int generation, List<PackEntry> wanted, boolean allowShaders) {
+    private static void process(MinecraftClient client, int generation, List<PackEntry> wanted,
+                                boolean allowShaders, long limit) {
         List<PackEntry> ready = new ArrayList<>();
         List<String> failures = new ArrayList<>();
 
@@ -227,7 +407,7 @@ public final class ResourceSync {
             try {
                 if (!isCached(entry)) {
                     index++;
-                    downloadWithProgress(client, generation, entry, index, missing);
+                    downloadWithProgress(client, generation, entry, index, missing, limit);
                 }
                 String problem = PackCache.inspect(PackCache.file(entry.sha1()), allowShaders);
                 if (problem != null) {
@@ -257,9 +437,9 @@ public final class ResourceSync {
     }
 
     private static void downloadWithProgress(MinecraftClient client, int generation, PackEntry entry,
-                                             int index, int total) throws IOException, InterruptedException {
+                                             int index, int total, long limit) throws IOException, InterruptedException {
         long[] lastUpdate = {0L};
-        PackDownloader.download(entry, () -> stale(generation), (done, size) -> {
+        PackDownloader.download(entry, limit, () -> stale(generation), (done, size) -> {
             long now = System.nanoTime();
             if (now - lastUpdate[0] < PROGRESS_INTERVAL_NANOS && done < size) {
                 return;

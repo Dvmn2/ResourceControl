@@ -1,5 +1,6 @@
 package net.dvmn2.resourcecontrol.client;
 
+import net.dvmn2.resourcecontrol.client.network.LimitPayload;
 import net.dvmn2.resourcecontrol.client.network.StatusPayload;
 import net.dvmn2.resourcecontrol.client.network.SyncPayload;
 import net.dvmn2.resourcecontrol.client.pack.ResourceSync;
@@ -19,8 +20,12 @@ public final class ResourceControlClient implements ClientModInitializer {
     public void onInitializeClient() {
         // Регистрация приёмника заодно сообщает серверу (minecraft:register), что мод установлен —
         // по этому плагин решает, кикать ли игрока и когда слать набор паков.
+        PayloadTypeRegistry.playS2C().register(LimitPayload.ID, LimitPayload.CODEC);
         PayloadTypeRegistry.playS2C().register(SyncPayload.ID, SyncPayload.CODEC);
         PayloadTypeRegistry.playC2S().register(StatusPayload.ID, StatusPayload.CODEC);
+
+        ClientPlayNetworking.registerGlobalReceiver(LimitPayload.ID, (payload, context) ->
+                context.client().execute(() -> ResourceSync.onLimit(context.client(), payload)));
 
         ClientPlayNetworking.registerGlobalReceiver(SyncPayload.ID, (payload, context) ->
                 context.client().execute(() -> ResourceSync.onSync(context.client(), payload)));

@@ -21,7 +21,7 @@ import java.util.function.BooleanSupplier;
 
 /**
  * Безопасная загрузка пака: только HTTPS (редиректы https->http запрещены самим HttpClient),
- * жёсткий лимит размера, проверка SHA-1 и объявленного размера, атомарная запись в кеш.
+ * лимит размера (одобренный игроком), проверка SHA-1 и объявленного размера, атомарная запись в кеш.
  */
 final class PackDownloader {
 
@@ -43,14 +43,14 @@ final class PackDownloader {
     private PackDownloader() {
     }
 
-    static void download(PackEntry entry, BooleanSupplier cancelled, Progress progress)
+    static void download(PackEntry entry, long maxBytes, BooleanSupplier cancelled, Progress progress)
             throws IOException, InterruptedException {
         URI uri = URI.create(entry.url());
         if (!"https".equalsIgnoreCase(uri.getScheme())) {
             throw new IOException("only https is allowed");
         }
         long expected = entry.size();
-        if (expected <= 0 || expected > PackCache.MAX_PACK_SIZE) {
+        if (expected <= 0 || expected > maxBytes || expected > PackCache.MAX_PACK_SIZE) {
             throw new IOException("invalid pack size: " + expected);
         }
 
