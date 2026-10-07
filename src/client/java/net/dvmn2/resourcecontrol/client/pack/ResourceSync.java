@@ -102,6 +102,12 @@ public final class ResourceSync {
      */
     public static void onClientStarted(MinecraftClient client) {
         appliedSignature = ActivePacks.signature();
+        // Постоянные паки используются прямо сейчас — продлить их срок в кеше (и убрать давно не нужное).
+        Set<String> inUse = new HashSet<>();
+        for (PackEntry e : ActivePacks.effective()) {
+            inUse.add(e.sha1());
+        }
+        EXECUTOR.submit(() -> PackCache.cleanup(inUse));
         // Если при старте ванильный код расставил несколько наших паков в другом порядке — выровнять.
         if (PackProfiles.reorderEnabled(client)) {
             PackProfiles.reload(client);

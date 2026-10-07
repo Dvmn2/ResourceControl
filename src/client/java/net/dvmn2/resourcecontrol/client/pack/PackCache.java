@@ -5,6 +5,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
@@ -88,24 +89,34 @@ public final class PackCache {
     }
 
     /**
-     * Удаляет из кеша файлы, которые не используются и не менялись 14 дней.
+     * Обслуживание кеша. Срок хранения считается от ПОСЛЕДНЕГО ИСПОЛЬЗОВАНИЯ пака:
+     * <ul>
+     *   <li>файлы из {@code keepSha1} (активный набор) защищены от удаления, а их время изменения
+     *       обновляется («продлевается»), не чаще раза в сутки;</li>
+     *   <li>остальные файлы (и недокачанные .part) удаляются, если их не использовали 14 дней.</li>
+     * </ul>
+     * Вызывается при старте игры и после каждой обработки набора от сервера.
      */
     public static void cleanup(Set<String> keepSha1) {
         Path dir = cacheDir();
         if (!Files.isDirectory(dir)) {
             return;
         }
-        Instant threshold = Instant.now().minus(14, ChronoUnit.DAYS);
+        Instant now = Instant.now();
+        Instant deleteBefore = now.minus(14, ChronoUnit.DAYS);
+        Instant touchBefore = now.minus(1, ChronoUnit.DAYS);
         try (Stream<Path> files = Files.list(dir)) {
             files.forEach(path -> {
                 String fileName = path.getFileName().toString();
                 int dot = fileName.lastIndexOf('.');
                 String base = dot < 0 ? fileName : fileName.substring(0, dot);
-                if (keepSha1.contains(base)) {
-                    return;
-                }
                 try {
-                    if (Files.getLastModifiedTime(path).toInstant().isBefore(threshold)) {
+                    Instant modified = Files.getLastModifiedTime(path).toInstant();
+                    if (keepSha1.contains(base)) {
+                        if (fileName.endsWith(".zip") && modified.isBefore(touchBefore)) {
+                            Files.setLastModifiedTime(path, FileTime.from(now));
+                        }
+                    } else if (modified.isBefore(deleteBefore)) {
                         Files.deleteIfExists(path);
                     }
                 } catch (IOException ignored) {
