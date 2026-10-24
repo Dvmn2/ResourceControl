@@ -9,28 +9,21 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Подмешивает паки ResourceControl в список доступных профилей клиентского менеджера ресурспаков.
- * Менеджер датапаков (тот же класс) не трогаем — сравниваем с менеджером клиента.
+ * Adds ResourceControl packs to the profiles known to the client's resource pack manager. The data pack
+ * manager is the same class, so the target is compared with the client's manager.
  */
 @Mixin(ResourcePackManager.class)
 public abstract class ResourcePackManagerMixin {
 
-    @Inject(method = "providePackProfiles", at = @At("RETURN"), cancellable = true)
-    private void rescontrol$addPacks(CallbackInfoReturnable<Map<String, ResourcePackProfile>> cir) {
+    @Inject(method = "providePackProfiles()Ljava/util/Map;", at = @At("RETURN"), cancellable = true)
+    private void resourcecontrol$addPacks(CallbackInfoReturnable<Map<String, ResourcePackProfile>> cir) {
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null || (Object) this != client.getResourcePackManager()) {
             return;
         }
-        Map<String, ResourcePackProfile> ours = PackProfiles.buildProfiles();
-        if (ours.isEmpty()) {
-            return;
-        }
-        Map<String, ResourcePackProfile> merged = new LinkedHashMap<>(cir.getReturnValue());
-        merged.putAll(ours);
-        cir.setReturnValue(merged);
+        cir.setReturnValue(PackProfiles.mergeInto(cir.getReturnValue()));
     }
 }

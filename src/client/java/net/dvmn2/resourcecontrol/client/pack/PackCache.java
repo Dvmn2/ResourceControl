@@ -1,6 +1,9 @@
 package net.dvmn2.resourcecontrol.client.pack;
 
 import net.fabricmc.loader.api.FabricLoader;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -8,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Enumeration;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -15,21 +19,24 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Локальный кеш паков: {@code <gameDir>/resourcecontrol/cache/<sha1>.zip}.
- * Имя файла строится ТОЛЬКО из проверенного sha1 (40 hex), поэтому ни URL, ни имя пака
- * из сети не могут повлиять на путь на диске. Паки не распаковываются — они
- * подключаются прямо из zip, так что path traversal невозможен по построению.
+ * Local pack cache: {@code <gameDir>/resourcecontrol/cache/<sha1>.zip}. File names are built ONLY from a
+ * validated sha1, so no URL or pack name from the network can influence a path. Packs are never unpacked:
+ * they are mounted straight from the zip, which rules out path traversal by construction.
  */
 public final class PackCache {
 
-    /**
-     * Абсолютный потолок размера одного пака (4 ГБ). Сервер не может запросить больше, что бы он
-     * ни прислал. Реально действующий лимит — то, что одобрил игрок (см. {@code ConsentStore}).
-     */
-    public static final long MAX_PACK_SIZE = 4L * 1024 * 1024 * 1024;
+    private static final Logger LOGGER = LoggerFactory.getLogger("resourcecontrol");
 
+    /**
+     * Absolute ceiling for one pack (4 GB). The effective limit is what the player approved.
+     */
+    public static final long MAX_PACK_SIZE = 4L * 1024L * 1024L * 1024L;
+
+    private static final int MAX_NAME_LENGTH = 32;
+    private static final long UNUSED_DELETE_DAYS = 14L;
+    private static final long TOUCH_INTERVAL_DAYS = 1L;
     private static final Pattern SHA1 = Pattern.compile("[0-9a-f]{40}");
-    private static final Pattern NAME = Pattern.compile("[a-z0-9_-]{1,32}");
+    private static final Pattern NAME = Pattern.compile("[a-z0-9_-]{1," + MAX_NAME_LENGTH + "}");
 
     private PackCache() {
     }
@@ -54,31 +61,30 @@ public final class PackCache {
         return cacheDir().resolve(sha1 + ".part");
     }
 
-    public static boolean isValidSha1(String s) {
-        return s != null && SHA1.matcher(s).matches();
+    public static boolean isValidSha1(String value) {
+        return SHA1.matcher(value).matches();
     }
 
-    public static boolean isValidName(String s) {
-        return s != null && NAME.matcher(s).matches();
+    public static boolean isValidName(String value) {
+        return NAME.matcher(value).matches();
     }
 
     /**
-     * Проверка скачанного/закешированного zip.
+     * Checks a downloaded or cached zip.
      *
-     * @return null, если пак годен; иначе — причина отказа
+     * @return null when the pack is acceptable, otherwise the reason it is not
      */
-    public static String inspect(Path file, boolean allowShaders) {
+    public static @Nullable String inspect(Path file, boolean allowShaders) {
         try (ZipFile zip = new ZipFile(file.toFile())) {
             if (zip.getEntry("pack.mcmeta") == null) {
                 return "no pack.mcmeta in archive root";
             }
             if (!allowShaders) {
-                var entries = zip.entries();
+                Enumeration<? extends ZipEntry> entries = zip.entries();
                 while (entries.hasMoreElements()) {
-                    ZipEntry entry = entries.nextElement();
-                    String[] parts = entry.getName().split("/");
+                    String[] parts = entries.nextElement().getName().split("/");
                     if (parts.length >= 3 && parts[0].equals("assets") && parts[2].equals("shaders")) {
-                        return "shaders are not allowed by the server";
+                        return "shaders are not allowed";
                     }
                 }
             }
@@ -89,13 +95,9 @@ public final class PackCache {
     }
 
     /**
-     * Обслуживание кеша. Срок хранения считается от ПОСЛЕДНЕГО ИСПОЛЬЗОВАНИЯ пака:
-     * <ul>
-     *   <li>файлы из {@code keepSha1} (активный набор) защищены от удаления, а их время изменения
-     *       обновляется («продлевается»), не чаще раза в сутки;</li>
-     *   <li>остальные файлы (и недокачанные .part) удаляются, если их не использовали 14 дней.</li>
-     * </ul>
-     * Вызывается при старте игры и после каждой обработки набора от сервера.
+     * Cache maintenance. Retention counts from the LAST USE of a pack: files in {@code keepSha1} are never
+     * deleted and get their timestamp refreshed at most once a day; other files (and unfinished .part files)
+     * are deleted after 14 days without use.
      */
     public static void cleanup(Set<String> keepSha1) {
         Path dir = cacheDir();
@@ -103,26 +105,31 @@ public final class PackCache {
             return;
         }
         Instant now = Instant.now();
-        Instant deleteBefore = now.minus(14, ChronoUnit.DAYS);
-        Instant touchBefore = now.minus(1, ChronoUnit.DAYS);
+        Instant deleteBefore = now.minus(UNUSED_DELETE_DAYS, ChronoUnit.DAYS);
+        Instant touchBefore = now.minus(TOUCH_INTERVAL_DAYS, ChronoUnit.DAYS);
         try (Stream<Path> files = Files.list(dir)) {
-            files.forEach(path -> {
-                String fileName = path.getFileName().toString();
-                int dot = fileName.lastIndexOf('.');
-                String base = dot < 0 ? fileName : fileName.substring(0, dot);
-                try {
-                    Instant modified = Files.getLastModifiedTime(path).toInstant();
-                    if (keepSha1.contains(base)) {
-                        if (fileName.endsWith(".zip") && modified.isBefore(touchBefore)) {
-                            Files.setLastModifiedTime(path, FileTime.from(now));
-                        }
-                    } else if (modified.isBefore(deleteBefore)) {
-                        Files.deleteIfExists(path);
-                    }
-                } catch (IOException ignored) {
+            files.forEach(path -> cleanupFile(path, keepSha1, now, deleteBefore, touchBefore));
+        } catch (IOException ex) {
+            LOGGER.warn("Could not list the pack cache", ex);
+        }
+    }
+
+    private static void cleanupFile(Path path, Set<String> keepSha1, Instant now, Instant deleteBefore,
+                                    Instant touchBefore) {
+        String fileName = path.getFileName().toString();
+        int dot = fileName.lastIndexOf('.');
+        String base = dot < 0 ? fileName : fileName.substring(0, dot);
+        try {
+            Instant modified = Files.getLastModifiedTime(path).toInstant();
+            if (keepSha1.contains(base)) {
+                if (fileName.endsWith(".zip") && modified.isBefore(touchBefore)) {
+                    Files.setLastModifiedTime(path, FileTime.from(now));
                 }
-            });
-        } catch (IOException ignored) {
+            } else if (modified.isBefore(deleteBefore)) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException ex) {
+            LOGGER.debug("Cache maintenance skipped {}", fileName, ex);
         }
     }
 }

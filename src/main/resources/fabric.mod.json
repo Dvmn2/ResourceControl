@@ -3,25 +3,15 @@
   "id": "resourcecontrol",
   "version": "${version}",
   "name": "ResourceControl",
-  "description": "Applies per-player resource packs pushed by the ResourceControlPlugin server plugin.",
-  "authors": [],
+  "description": "Applies per-player resource packs sent by the ResourceControlPlugin server plugin.",
+  "authors": ["DVMN2"],
   "contact": {},
   "license": "All-Rights-Reserved",
-  "icon": "assets/resourcecontrol/icon.png",
   "environment": "client",
   "entrypoints": {
-    "fabric-datagen": [
-      "net.dvmn2.resourcecontrol.client.ResourceControlDataGenerator"
-    ],
-    "client": [
-      "net.dvmn2.resourcecontrol.client.ResourceControlClient"
-    ],
-    "main": [
-      "net.dvmn2.resourcecontrol.ResourceControl"
-    ]
+    "client": ["net.dvmn2.resourcecontrol.client.ResourceControlClient"]
   },
   "mixins": [
-    "resourcecontrol.mixins.json",
     {
       "config": "resourcecontrol.client.mixins.json",
       "environment": "client"
