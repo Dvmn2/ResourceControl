@@ -11,14 +11,14 @@ import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
 import net.minecraft.text.Text;
 
 /**
- * Client command {@code /resourcecontrol}: the player's emergency switch and status.
+ * Client command {@code /rc}: the player's emergency switch and status.
  * <pre>
- * /resourcecontrol off             ignore the server and remove all packs
- * /resourcecontrol on              enable again
- * /resourcecontrol status          show the current state
- * /resourcecontrol clear           remove saved packs
- * /resourcecontrol shaders allow   allow packs with shaders
- * /resourcecontrol shaders block   reject packs with shaders
+ * /rc off             ignore the server and remove all packs
+ * /rc on              enable again
+ * /rc status          show the current state
+ * /rc clear           remove saved packs
+ * /rc shaders allow   allow packs with shaders
+ * /rc shaders block   reject packs with shaders
  * </pre>
  * Subcommands unknown to the client (the server plugin's) are forwarded to the server by Fabric.
  */
@@ -34,7 +34,7 @@ public final class ResourceControlCommand {
      * Builds the command tree for registration.
      */
     public LiteralArgumentBuilder<FabricClientCommandSource> build() {
-        return ClientCommandManager.literal("resourcecontrol")
+        return ClientCommandManager.literal("rc")
                 .then(ClientCommandManager.literal("off").executes(this::off))
                 .then(ClientCommandManager.literal("on").executes(this::on))
                 .then(ClientCommandManager.literal("status").executes(this::status))

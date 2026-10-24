@@ -1,110 +1,87 @@
 # ResourceControl
 
-Fabric client mod for Minecraft 1.21.11. Applies resource packs that the server plugin
-[ResourceControlPlugin](https://github.com/Dvmn2/ResourceControlPlugin) has assigned to a specific player.
-
-The mod has no standalone functionality. Without the plugin on the server it does nothing.
+Fabric client mod that downloads and applies the resource packs a server assigns to the player. Companion plugin: `ResourceControlPlugin`.
 
 ## Requirements
+- Minecraft 1.21.11, Java 21
+- Fabric Loader >= 0.19.5, Fabric API (built against `0.141.6+1.21.11`)
+- Companion plugin `ResourceControlPlugin` >= 2.0.0 (protocol 2) on the server
 
-| Component | Version |
-|---|---|
-| Minecraft | 1.21.11 |
-| Fabric Loader | see `gradle.properties` (`loader_version`) |
-| Fabric API | required |
-| Environment | client only |
-| Java | 21 |
-
-## Installation
-
-1. Install Fabric Loader and Fabric API.
-2. Place `ResourceControl-<version>.jar` in the `mods` folder.
-3. Connect to a server that runs ResourceControlPlugin.
-
-Servers with `require-client-mod` enabled disconnect players who do not have the mod.
-
-## How it works
-
-1. On join, the mod announces itself to the plugin (registration of the `dvmn2:rc_sync` channel).
-2. The plugin sends the player's full pack set: name, HTTPS URL, SHA-1, size, priority, `persistent` flag.
-3. The mod downloads packs that are not in the cache. Progress is shown in the action bar.
-4. After downloading, the mod mounts the packs on top of the vanilla resources and reloads resources once.
-5. The mod reports a status to the plugin: downloading, ready, or failed with a reason.
-
-Each new plugin message replaces the previous set. If the set has not changed, no reload is performed.
-
-### Layer order
-
-Vanilla resources, then the vanilla server resource pack, then ResourceControl packs in ascending priority.
-A pack with a higher priority overrides a pack with a lower priority.
-
-### The persistent flag
-
-| Flag | Behavior |
-|---|---|
-| `persistent = true` | The pack is saved to `state.json` and mounted on every game launch. It stays active after leaving the server. Allows changing the main menu panorama. |
-| `persistent = false` | The pack is active only while connected to the server and is removed on disconnect. |
-
-A saved pack is replaced or removed when any server with the plugin sends a set that no longer contains it.
-
-## Files on disk
-
-Directory `<game dir>/resourcecontrol/`:
-
-| Path | Purpose |
-|---|---|
-| `cache/<sha1>.zip` | Cache of downloaded packs. Unused files older than 14 days are deleted. |
-| `state.json` | List of persistent packs mounted at launch. |
-
-## Client command
-
-| Command | Action |
-|---|---|
-| `/rcclear` | Removes all saved persistent packs and reloads resources. |
-
-## Security
-
-- Only HTTPS URLs are accepted. Redirects to HTTP are rejected.
-- Maximum pack size is capped at 256 MB regardless of the value sent by the server.
-- A file is accepted only if both SHA-1 and size match.
-- The cache file name is derived from the SHA-1. The URL and pack name do not affect the path.
-- Archives are not extracted, so path traversal is not possible.
-- If the server disallows shaders, packs containing `assets/*/shaders` are rejected.
-- Packs are mounted as required and pinned. They cannot be disabled in the resource pack menu.
-
-## Limitations
-
-- Reloading resources when a set is applied briefly freezes the client.
-- Persistent packs remain active on other servers until the set is replaced.
-- Core shaders may conflict with Sodium and Iris.
-
-## Building
-
-```
-./gradlew build
+## Build and run
+```bash
+./gradlew build      # build/libs/ResourceControl-<version>.jar
+./gradlew runClient  # Minecraft 1.21.11 dev client
 ```
 
-Output: `build/libs/ResourceControl-<version>.jar`.
+## Architecture
+Package `net.dvmn2.resourcecontrol.client` (source set `client`; `src/main` holds only `fabric.mod.json`):
+
+| Class | Responsibility |
+|---|---|
+| `ResourceControlClient` | entry point: registers payloads, receivers, events and the command |
+| `ResourceControlConfig` | player settings (`config/resourcecontrol.json`); the server cannot override them |
+| `command.ResourceControlCommand` | `/rc off\|on\|status\|clear\|shaders allow\|block` |
+| `mixin.ResourcePackManagerMixin` | adds our pack profiles to the client's `ResourcePackManager`; no logic of its own |
+| `network.LimitPayload`, `SyncPayload`, `StatusPayload` | packets and their codecs (format in Javadoc) |
+| `network.StatusReporter` | sends status messages to the server |
+| `network.ResourceControlProtocol` | `PROTOCOL` constant |
+| `pack.PackCache` | cache paths, zip inspection, cache cleanup |
+| `pack.PackDownloader` | safe https download with SHA-1 and size verification, stall watchdog |
+| `pack.PackProfiles` | builds pack profiles, fixes enabled order, reloads resources |
+| `pack.PackValidator` | validates a received pack set before any download |
+| `state.ActivePacks` | persistent and session pack sets; owns `state.json` |
+| `sync.SyncManager` | processes server messages, downloads in the background, applies the result |
+| `sync.ConsentManager` | asks the player to allow downloads of a size and remembers the answer |
+| `sync.ConsentStore` | per-server consents on disk (`consent.json`) |
+| `sync.ReloadManager` | starts resource reloads at a safe moment |
+| `util.AtomicFiles`, `Overlay` | atomic file writes; action bar messages from any thread |
+
+Threading:
+- Message handlers, `ConsentManager`, `ReloadManager` and the command run on the client thread.
+- Downloads and zip inspection run on the single daemon thread `ResourceControl-Downloader`; results return with `client.execute`. A stale result is dropped by comparing an `AtomicInteger` generation counter.
+- A daemon scheduler thread (`ResourceControl-Watchdog`) aborts downloads that stall for 30 seconds.
+
+Lifecycle:
+1. `onInitializeClient`: create `ReloadManager` and `SyncManager`, register payload types, receivers, `DISCONNECT`, `CLIENT_STARTED`, tick event and the command.
+2. `CLIENT_STARTED`: remember the applied pack set, reorder enabled packs, clean the cache in the background.
+3. On a server message: validate, ask for consent if needed, download, `ActivePacks.set`, request a reload.
+4. `DISCONNECT`: cancel work, reset consent state, drop session packs, request a reload after the world is closed.
+
+## Public API
+None.
 
 ## Protocol
+| Channel | Direction | Protocol | Format |
+|---|---|---|---|
+| `dvmn2:rc_limit` | S2C | 2 | `LimitPayload` Javadoc |
+| `dvmn2:rc_sync` | S2C | 2 | `SyncPayload` Javadoc |
+| `dvmn2:rc_status` | C2S | 2 | `StatusPayload` Javadoc |
 
-Channel `dvmn2:rc_sync` (server → client):
+Compatibility rules:
+- The first field of every packet is a VarInt protocol version; `ResourceControlProtocol.PROTOCOL` must equal the plugin's `SyncManager.PROTOCOL` and is increased on every format change.
+- A packet with another protocol is ignored silently. Mod 2.x works only with plugin 2.x.
+- Packets that fail to decode become a packet with `INVALID_PROTOCOL` (the rest of the buffer is skipped), so a malformed message never disconnects the player.
+- Registering the receivers makes the server see the mod as installed.
 
-```
-VarInt  protocol = 1
-Boolean allowShaders
-VarInt  count (maximum 64)
-count × { String name, String url, String sha1, VarLong size, VarInt priority, Boolean persistent }
-```
+## Data and files
+| File | Format | Version | Content |
+|---|---|---|---|
+| `config/resourcecontrol.json` | JSON | none | `enabled` (default `true`), `blockShaders` (default `false`) |
+| `<gameDir>/resourcecontrol/state.json` | JSON | `version: 1` | saved ("persistent") packs: `name`, `sha1`, `size`, `priority` |
+| `<gameDir>/resourcecontrol/consent.json` | JSON | `version: 1` | per-server approved pack size in bytes |
+| `<gameDir>/resourcecontrol/cache/<sha1>.zip` | zip | n/a | downloaded packs; `.part` files are unfinished downloads |
 
-Channel `dvmn2:rc_status` (client → server):
+All files are written atomically (temp file and move). A corrupt `state.json` loses the saved packs and a corrupt `consent.json` means "no consents"; the game still starts. Cache files unused for 14 days are deleted (the timestamp of a pack in use is refreshed at most once a day). There is no migration from 1.x.
 
-```
-VarInt protocol
-VarInt state    0 — downloading, 1 — ready, 2 — failed
-String message
-```
+## Conventions and constraints
+- File names in the cache are built only from a validated SHA-1; packs are mounted straight from the zip and never unpacked, so network data cannot influence a path.
+- Only `https` is accepted; the HTTP client does not follow redirects to `http`. The declared size is checked against the size the player approved before the download, and the actual size and SHA-1 afterwards.
+- The consent decision is stored only on the client and is never sent to the server. The size limit from the server is a request, not a permission.
+- Resource reloads are never started from the `DISCONNECT` event: callers only mark a reload as needed and `ReloadManager#onTick` starts it later (reloading while the world is torn down can leave the loading screen stuck). The applied signature is fixed only when the reload really starts.
+- `PackProfiles#mergeInto` catches errors, logs once and disables the feature until restart instead of breaking the resource pack screen.
+- `/rc off` clears all packs and ignores the server; `/rc on` replays the last server messages kept in memory. `blockShaders` also filters saved packs mounted at game start.
+- The command root is the same as the server plugin's; Fabric forwards subcommands unknown to the client to the server.
+- The mod renders no effects of its own, so it has no intensity or flashing settings.
 
 ## License
-
-All Rights Reserved.
+All rights reserved.
